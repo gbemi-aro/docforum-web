@@ -3,6 +3,7 @@
 // packages/api-client/openapi/ — contract drift is a compile error here.
 import type { Schemas } from '@docforum/api-client';
 import { api, apiFetch } from './api-client';
+import type { ActiveSession, RevokeOtherSessionsResult } from '../types/models';
 
 export type AuthSession = Schemas['AuthSession'];
 export type SignupInput = Schemas['SignupInput'];
@@ -24,4 +25,26 @@ export function logout(accessToken: string): Promise<void> {
  * is cross-site, so `api-client`'s `credentials: 'include'` is required. */
 export function refresh(): Promise<AuthSession> {
   return apiFetch<AuthSession>('/auth/refresh', { method: 'POST' });
+}
+
+// Active sessions and devices (issue #79). ASSUMED contract —
+// docforum-core#38 has not landed; see ARCHITECTURE_ESSENTIALS.md "Known
+// assumptions". Coarse device/location only, never a full IP address.
+
+export function listSessions(accessToken: string): Promise<ActiveSession[]> {
+  return apiFetch<ActiveSession[]>('/auth/sessions', { accessToken });
+}
+
+export function revokeSession(sessionId: string, accessToken: string): Promise<void> {
+  return apiFetch<void>(`/auth/sessions/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+    accessToken,
+  });
+}
+
+export function revokeOtherSessions(accessToken: string): Promise<RevokeOtherSessionsResult> {
+  return apiFetch<RevokeOtherSessionsResult>('/auth/sessions/others', {
+    method: 'DELETE',
+    accessToken,
+  });
 }

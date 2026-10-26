@@ -1801,3 +1801,23 @@ export interface CreatePaymentIntentInput {
   facilityId: string;
   amountStroops: string;
 }
+
+// --- Active sessions and devices (#79) ---------------------------------------
+// assumed — docforum-core#38 (session list/revoke) has not landed. Coarse
+// device/location only: the API never exposes a full IP address, and the UI
+// must not try to derive one.
+
+export interface ActiveSession {
+  id: string;
+  /** Coarse label the API provides, e.g. "iPhone · Safari". */
+  device: string;
+  /** Coarse city/country, or null when the API has no location. */
+  approximateLocation: string | null;
+  lastActiveAt: string;
+  createdAt: string;
+  isCurrent: boolean;
+}
+
+export interface RevokeOtherSessionsResult {
+  revokedCount: number;
+}

@@ -46,6 +46,20 @@ real API" (no refresh-on-reload flow).
   (`.github/workflows/deploy-pages.yml`) — see `ARCHITECTURE_ESSENTIALS.md`
   "Deployment". Not a production deploy decision for the org; scoped to
   this repo's static frontend only.
+- [x] Active sessions and devices management. Tracked as
+  [issue #79](https://github.com/DocForum/docforum-web/issues/79) (High,
+  200 pts) — `SessionsSection` in account settings lists each session with
+  coarse device/location and last active, marks the current device, revokes
+  one or all others behind a confirmation, treats an already-revoked session
+  as gone (not an error), and clears all client state when the current
+  session is revoked. Built against an assumed contract: docforum-core#38
+  has not landed — see `ARCHITECTURE_ESSENTIALS.md` "Known assumptions".
+- [x] Rate-limit and lockout UX: Retry-After handling across the app.
+  Tracked as [issue #80](https://github.com/DocForum/docforum-web/issues/80)
+  (High, 200 pts) — `RateLimitError` with `Retry-After` parsing in
+  `api-client.ts`, an accessible countdown that disables login/signup until
+  the lockout ends, a retry delay that never retries sooner than the header
+  allows, and one global non-blocking notice. Depends on docforum-core#35.
 
 ## Phase W2 — Patient core flow
 **Fully scoped into issues #1–#5, #18–#23, #26–#29, plus the follow-on patient issues #32–#34 and #37.**

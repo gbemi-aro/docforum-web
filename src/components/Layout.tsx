@@ -20,6 +20,7 @@ import { RecordSearch } from '../features/search-records/components/RecordSearch
 import { PageHeader } from './PageHeader';
 import { Flag } from './Flag';
 import { useRealtimeCacheSync } from '../hooks/useRealtimeCacheSync';
+import { RateLimitNotice } from './RateLimitNotice';
 import styles from './Layout.module.css';
 
 /** Roles a user may have. Mirrored from docforum-core's model. */
@@ -188,6 +189,9 @@ export function Layout() {
       </a>
 
       <OfflineBanner />
+
+      {/* Global, non-blocking 429 notice (issue #80). */}
+      <RateLimitNotice />
 
       <header className={styles.header} role="banner">
         <div className={styles.brandBar}>

@@ -2,6 +2,7 @@ import { useRef } from 'react';
 import { DataExportSection } from '../features/account/components/DataExportSection';
 import { DeleteAccountSection } from '../features/account/components/DeleteAccountSection';
 import { ActingForBanner } from '../features/dependents/components/ActingForBanner';
+import { SessionsSection } from '../features/account/components/SessionsSection';
 import { CalendarSubscriptionSection } from '../features/settings/components/CalendarSubscriptionSection';
 import { TimeZonePreference } from '../i18n/components/TimeZonePreference';
 import { ErrorBoundary } from '../components/ErrorBoundary';
@@ -37,6 +38,8 @@ export function AccountSettingsPage() {
           <DataExportSection />
         </div>
       </ErrorBoundary>
+
+      <SessionsSection />
 
       <ErrorBoundary level="section">
         <CalendarSubscriptionSection />

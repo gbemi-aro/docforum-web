@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   ApiError,
   ApiTimeoutError,
+  DEFAULT_RETRY_AFTER_SECONDS,
   DEFAULT_TIMEOUT_MS,
   IDEMPOTENCY_HEADER,
   NETWORK_ERROR_CODE,
@@ -13,7 +14,10 @@ import {
   createIdempotencyKey,
   isAbortError,
   isRetryableError,
+  parseRetryAfter,
+  RateLimitError,
 } from './api-client';
+import { useRateLimitStore } from '../store/rate-limit-store';
 
 function jsonResponse(a: unknown, b: unknown = 200): Response {
   const statusFirst = typeof a === 'number';
@@ -439,5 +443,102 @@ describe('multipart uploads (apiFetchForm)', () => {
     const assertion = expect(attempt).rejects.toSatisfy(isAbortError);
     controller.abort();
     await assertion;
+  });
+});
+
+function tooManyRequests(retryAfter?: string): Response {
+  return new Response(JSON.stringify({ message: 'Too many attempts' }), {
+    status: 429,
+    statusText: 'Too Many Requests',
+    headers: {
+      'content-type': 'application/json',
+      ...(retryAfter ? { 'Retry-After': retryAfter } : {}),
+    },
+  });
+}
+
+describe('Retry-After parsing (#80)', () => {
+  it('reads delta-seconds', () => {
+    expect(parseRetryAfter('120')).toBe(120);
+    expect(parseRetryAfter(' 45 ')).toBe(45);
+  });
+
+  it('reads an HTTP date relative to now', () => {
+    const now = Date.parse('2026-10-20T12:00:00.000Z');
+    const header = new Date(now + 90_000).toUTCString();
+    expect(parseRetryAfter(header, now)).toBe(90);
+  });
+
+  it('returns null for an absent or unusable header', () => {
+    expect(parseRetryAfter(null)).toBeNull();
+    expect(parseRetryAfter('')).toBeNull();
+    expect(parseRetryAfter('soon')).toBeNull();
+  });
+});
+
+describe('429 rate limiting (#80)', () => {
+  afterEach(() => {
+    useRateLimitStore.getState().clear();
+  });
+
+  it('throws a typed RateLimitError and raises the global notice', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(tooManyRequests('30'));
+
+    const error = (await apiFetch('/auth/login', { method: 'POST', body: {} }).catch(
+      (e: unknown) => e,
+    )) as RateLimitError;
+
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).toMatchObject({ status: 429, retryAfterSeconds: 30, message: 'Too many attempts' });
+    expect(error.retryAfterMs).toBe(30_000);
+    expect(useRateLimitStore.getState().retryAfterSeconds).toBe(30);
+    expect(useRateLimitStore.getState().retryAt).toEqual(expect.any(Number));
+  });
+
+  it('falls back to the default wait when Retry-After is missing', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(tooManyRequests());
+
+    const error = (await apiFetch('/auth/signup', { method: 'POST', body: {} }).catch(
+      (e: unknown) => e,
+    )) as RateLimitError;
+
+    expect(error).toBeInstanceOf(RateLimitError);
+    expect(error.retryAfterSeconds).toBe(DEFAULT_RETRY_AFTER_SECONDS);
+  });
+
+  it('never retries a 429 sooner than Retry-After allows', async () => {
+    vi.spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(tooManyRequests('30'))
+      .mockResolvedValueOnce(jsonResponse(200, { ok: true }));
+    const sleep = vi.fn().mockResolvedValue(undefined);
+
+    await expect(
+      apiFetch('/doctor/queue/today', { retry: { maxAttempts: 2, baseDelayMs: 1, sleep } }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(sleep).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledWith(30_000);
+  });
+
+  it('does not retry a rate-limited mutation without an Idempotency-Key', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(tooManyRequests('5'));
+
+    await expect(apiFetch('/appointments', { method: 'POST', body: {} })).rejects.toBeInstanceOf(
+      RateLimitError,
+    );
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps other non-2xx responses as plain ApiErrors', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(jsonResponse({ message: 'Nope' }, 403));
+
+    const error = (await apiFetch('/auth/login', { method: 'POST', body: {} }).catch(
+      (e: unknown) => e,
+    )) as ApiError;
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error).not.toBeInstanceOf(RateLimitError);
+    expect(useRateLimitStore.getState().retryAt).toBeNull();
   });
 });

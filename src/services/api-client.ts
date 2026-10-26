@@ -11,6 +11,8 @@
 // different domains), which `fetch` only sends/stores with this flag.
 import { createApiClient, type ApiTransport, type TransportOptions } from '@docforum/api-client';
 
+import { notifyRateLimit } from '../store/rate-limit-store';
+
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:4000';
 
 export function getApiBaseUrl(): string {
@@ -88,6 +90,58 @@ export class ApiError extends Error {
 
 /** Error code used when the request never reached the backend. */
 export const NETWORK_ERROR_CODE = 'NETWORK_ERROR';
+
+/** Fallback when a 429 arrives without a usable `Retry-After` header. */
+export const DEFAULT_RETRY_AFTER_SECONDS = 60;
+
+/**
+ * Parse a `Retry-After` header (delta-seconds or an HTTP date) into whole
+ * seconds. Returns `null` when the header is absent or unusable, so callers
+ * can fall back to `DEFAULT_RETRY_AFTER_SECONDS`.
+ */
+export function parseRetryAfter(header: string | null, now: number = Date.now()): number | null {
+  if (!header) return null;
+  const value = header.trim();
+  if (value === '') return null;
+
+  if (/^\d+$/.test(value)) {
+    const seconds = Number(value);
+    return Number.isSafeInteger(seconds) ? seconds : null;
+  }
+
+  const date = Date.parse(value);
+  if (Number.isNaN(date)) return null;
+  return Math.max(0, Math.ceil((date - now) / 1000));
+}
+
+/**
+ * A `429 Too Many Requests` from docforum-core, carrying the wait the server
+ * asked for. Every surface derives its countdown from `retryAfterSeconds`, and
+ * every retry path uses `retryAfterMs` as a floor, so nothing retries sooner
+ * than `Retry-After` allows (issue #80).
+ */
+export class RateLimitError extends ApiError {
+  readonly retryAfterSeconds: number;
+
+  constructor(
+    message: string,
+    retryAfterSeconds: number,
+    body?: unknown,
+    extra: {
+      code?: string | null;
+      details?: unknown;
+      requestId?: string | null;
+    } = {},
+  ) {
+    super(message, 429, body, extra);
+    this.name = 'RateLimitError';
+    this.retryAfterSeconds = retryAfterSeconds;
+  }
+
+  get retryAfterMs(): number {
+    return this.retryAfterSeconds * 1000;
+  }
+}
 
 /** A request that exceeded its timeout budget. Distinct from `ApiError`
  * (a response arrived) and from an `AbortError` (the caller went away —
@@ -225,9 +279,15 @@ async function withRetry<T>(
         options.signal?.aborted !== true &&
         controller?.signal.aborted !== true;
       if (!canRetry) throw error;
-      await sleep(
-        computeBackoffMs(attempt, retry.baseDelayMs ?? DEFAULT_BASE_DELAY_MS, retry.maxDelayMs ?? DEFAULT_MAX_DELAY_MS),
+      const backoffMs = computeBackoffMs(
+        attempt,
+        retry.baseDelayMs ?? DEFAULT_BASE_DELAY_MS,
+        retry.maxDelayMs ?? DEFAULT_MAX_DELAY_MS,
       );
+      // `Retry-After` is a floor, never a target: a 429 must not be retried
+      // before the server said it is safe (issue #80).
+      const floorMs = error instanceof RateLimitError ? error.retryAfterMs : 0;
+      await sleep(Math.max(backoffMs, floorMs));
     }
   }
   throw lastError;
@@ -294,16 +354,24 @@ async function throwForResponse(response: Response): Promise<never> {
   const nested = (envelope as { error?: ApiErrorEnvelope }).error;
   const source = nested && typeof nested === 'object' ? nested : envelope;
 
-  throw new ApiError(
-    asString(source.message) ?? response.statusText,
-    response.status,
-    payload,
-    {
-      code: asString(source.code),
-      details: source.details,
-      requestId: asString(source.requestId) ?? asString(headerRequestId),
-    },
-  );
+  const fields = {
+    code: asString(source.code),
+    details: source.details,
+    requestId: asString(source.requestId) ?? asString(headerRequestId),
+  };
+  const message = asString(source.message) ?? response.statusText;
+
+  // A 429 carries how long the server wants us to wait; surface it as a
+  // typed error so every caller can honour `Retry-After` (issue #80) and
+  // record one global, non-blocking notice.
+  if (response.status === 429) {
+    const retryAfterSeconds =
+      parseRetryAfter(response.headers.get('Retry-After')) ?? DEFAULT_RETRY_AFTER_SECONDS;
+    notifyRateLimit(retryAfterSeconds);
+    throw new RateLimitError(message, retryAfterSeconds, payload, fields);
+  }
+
+  throw new ApiError(message, response.status, payload, fields);
 }
 
 async function parseResponse<T>(response: Response, parse: ParseMode): Promise<T> {
@@ -592,16 +660,20 @@ export function apiUpload<T>(path: string, formData: FormData, options: UploadOp
       const source = (envelope.error && typeof envelope.error === 'object')
         ? (envelope.error as ApiErrorEnvelope)
         : envelope;
-      reject(new ApiError(
-        asString(source.message) ?? xhr.statusText,
-        xhr.status,
-        payload,
-        {
-          code: asString(source.code),
-          details: source.details,
-          requestId: asString(source.requestId) ?? xhr.getResponseHeader('x-request-id'),
-        },
-      ));
+      const fields = {
+        code: asString(source.code),
+        details: source.details,
+        requestId: asString(source.requestId) ?? xhr.getResponseHeader('x-request-id'),
+      };
+      const message = asString(source.message) ?? xhr.statusText;
+      if (xhr.status === 429) {
+        const retryAfterSeconds =
+          parseRetryAfter(xhr.getResponseHeader('Retry-After')) ?? DEFAULT_RETRY_AFTER_SECONDS;
+        notifyRateLimit(retryAfterSeconds);
+        reject(new RateLimitError(message, retryAfterSeconds, payload, fields));
+        return;
+      }
+      reject(new ApiError(message, xhr.status, payload, fields));
     };
     xhr.onerror = () => {
       cleanup();
